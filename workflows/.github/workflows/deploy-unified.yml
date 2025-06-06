@@ -1,0 +1,191 @@
+name: XPIPS Unified Deployment
+
+on:
+  push:
+    branches:
+      - main # Auto-deploy to production only on main
+  workflow_dispatch: # Manual deployments
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+          - test
+      services:
+        description: 'Services to deploy'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - backend
+          - web
+          - dashboard
+      skip_backend:
+        description: 'Skip backend deployment (for faster frontend-only deploys)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # Deployment job
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Determine deployment parameters
+        id: deploy-params
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "services=all" >> $GITHUB_OUTPUT
+            echo "Auto-deployment to production (main branch push)"
+          else
+            echo "environment=${{ github.event.inputs.environment || 'staging' }}" >> $GITHUB_OUTPUT
+            echo "services=${{ github.event.inputs.services || 'all' }}" >> $GITHUB_OUTPUT
+            echo "Manual deployment triggered"
+          fi
+
+      - name: Install AWS CLI
+        if: steps.deploy-params.outputs.services == 'all' || steps.deploy-params.outputs.services == 'backend'
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+
+      - name: Configure AWS credentials
+        if: steps.deploy-params.outputs.services == 'all' || steps.deploy-params.outputs.services == 'backend'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-north-1
+
+      - name: Install Elastic Beanstalk CLI
+        if: steps.deploy-params.outputs.services == 'all' || steps.deploy-params.outputs.services == 'backend'
+        run: |
+          pip install awsebcli
+
+      - name: Deploy Backend
+        if: (steps.deploy-params.outputs.services == 'all' || steps.deploy-params.outputs.services == 'backend') && github.event.inputs.skip_backend != 'true'
+        working-directory: ./xpips-backend
+        run: |
+          echo "🚀 Deploying Backend..."
+          npm ci
+          npm run build
+
+          # Check if EB is initialized
+          if [ ! -d ".elasticbeanstalk" ]; then
+            echo "Initializing Elastic Beanstalk..."
+            eb init xpips-backend --platform node.js --region eu-north-1
+          fi
+
+          # Deploy
+          eb deploy xpips-backend-prod --timeout 20
+          echo "✅ Backend deployment completed"
+
+      - name: Deploy Web Frontend
+        if: steps.deploy-params.outputs.services == 'all' || steps.deploy-params.outputs.services == 'web'
+        working-directory: ./xpips-web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "🌐 Deploying Web Frontend to ${{ steps.deploy-params.outputs.environment }}..."
+          npm ci
+          npx opennextjs-cloudflare build
+
+          case "${{ steps.deploy-params.outputs.environment }}" in
+            "test")
+              npx wrangler deploy --config wrangler.test.jsonc
+              echo "✅ Deployed to https://test.xpips.com"
+              ;;
+            "staging")
+              npx wrangler deploy --config wrangler.staging.jsonc
+              echo "✅ Deployed to https://staging.xpips.com"
+              ;;
+            "production")
+              npx wrangler deploy --config wrangler.web-prod.jsonc
+              echo "✅ Deployed to https://web-prod.xpips.com"
+              ;;
+          esac
+
+      - name: Deploy Dashboard
+        if: steps.deploy-params.outputs.services == 'all' || steps.deploy-params.outputs.services == 'dashboard'
+        working-directory: ./xpips-dashboard
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          NEXT_PUBLIC_XPIPS_API_URL: ${{ secrets.NEXT_PUBLIC_XPIPS_API_URL }}
+          NEXT_PUBLIC_LANDING_PAGE_URL: ${{ secrets.NEXT_PUBLIC_LANDING_PAGE_URL }}
+        run: |
+          echo "📊 Deploying Dashboard to ${{ steps.deploy-params.outputs.environment }}..."
+          npm ci --force
+          npx opennextjs-cloudflare build
+
+          case "${{ steps.deploy-params.outputs.environment }}" in
+            "test"|"staging")
+              npx wrangler deploy --config wrangler.staging.jsonc
+              echo "✅ Deployed to https://dashboard-staging.xpips.com"
+              ;;
+            "production")
+              npx wrangler deploy --config wrangler.production.jsonc
+              echo "✅ Deployed to https://dashboard-prod.xpips.com"
+              ;;
+          esac
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ steps.deploy-params.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Services:** ${{ steps.deploy-params.outputs.services }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          case "${{ steps.deploy-params.outputs.environment }}" in
+            "test")
+              echo "### 🌍 Deployed URLs:" >> $GITHUB_STEP_SUMMARY
+              echo "- **Web:** https://test.xpips.com" >> $GITHUB_STEP_SUMMARY
+              echo "- **Dashboard:** https://dashboard-staging.xpips.com" >> $GITHUB_STEP_SUMMARY
+              echo "- **Backend:** AWS Production (shared)" >> $GITHUB_STEP_SUMMARY
+              ;;
+            "staging")
+              echo "### 🌍 Deployed URLs:" >> $GITHUB_STEP_SUMMARY
+              echo "- **Web:** https://staging.xpips.com" >> $GITHUB_STEP_SUMMARY
+              echo "- **Dashboard:** https://dashboard-staging.xpips.com" >> $GITHUB_STEP_SUMMARY
+              echo "- **Backend:** AWS Production" >> $GITHUB_STEP_SUMMARY
+              ;;
+            "production")
+              echo "### 🌍 Deployed URLs:" >> $GITHUB_STEP_SUMMARY
+              echo "- **Web:** https://web-prod.xpips.com" >> $GITHUB_STEP_SUMMARY
+              echo "- **Dashboard:** https://dashboard-prod.xpips.com" >> $GITHUB_STEP_SUMMARY
+              echo "- **Backend:** AWS Production" >> $GITHUB_STEP_SUMMARY
+              ;;
+          esac
+
+      - name: Notify on Failure
+        if: failure()
+        run: |
+          echo "## ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The deployment to **${{ steps.deploy-params.outputs.environment }}** failed." >> $GITHUB_STEP_SUMMARY
+          echo "Please check the logs above for details." >> $GITHUB_STEP_SUMMARY
