@@ -19,9 +19,10 @@ NC='\033[0m' # No Color
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKEND_DIR="$SCRIPT_DIR/xpips-backend"
-WEB_DIR="$SCRIPT_DIR/xpips-web"
-DASHBOARD_DIR="$SCRIPT_DIR/xpips-dashboard"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BACKEND_DIR="$WORKSPACE_ROOT/xpips-backend"
+WEB_DIR="$WORKSPACE_ROOT/xpips-web"
+DASHBOARD_DIR="$WORKSPACE_ROOT/xpips-dashboard"
 
 # Function to print colored output
 print_status() {
